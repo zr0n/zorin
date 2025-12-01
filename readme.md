@@ -1,10 +1,11 @@
 # Zorin DLL Injector v0.2
 
-![Windows](https://img.shields.io/badge/Platform-Windows-blue) ![Python](https://img.shields.io/badge/Python-3.6+-yellow) !(License)(https://img.shields.io/badge/License-MIT-green)
+![Windows](https://img.shields.io/badge/Platform-Windows-blue) ![Python](https://img.shields.io/badge/Python-3.6+-yellow)
+![License](https://img.shields.io/badge/License-MIT-green)
 
 A professional DLL injection tool for cybersecurity education and authorized penetration testing.
 
-## 👠 Overview
+## Overview
 
  Zorin is a DLL proxy injector that:
  - Creates a proxy DLL with export forwarding
@@ -14,7 +15,7 @@ A professional DLL injection tool for cybersecurity education and authorized pen
 
 **WARNING: For educational use only. Always obtain proper authorization before testing.**
 
-## 🚠 Installation
+## Installation
 
 ```bash
 # 1. Install Python 3.6+
@@ -59,7 +60,7 @@ Example:
 python zorin.py "C:\\Program Files (x86)\\Nmap\\libssh2.dll" payload.c
 ```
 
-## 💅 Payload Examples
+## Payload Examples
 
 ### Basic Message Box
 
@@ -93,7 +94,7 @@ void payload() {
 }
 ```
 
-## ⚠️ How It Works
+## How It Works
 
 1. Analyze target DLL exports
 2. Create proxy DLL source
@@ -105,23 +106,23 @@ C5. Backup original (*_original.dll)
     - Execute payload
     - Forward all calls to original
 
-## 🚁 Restoration
+## Restoration
 
 1. Delete proxy DLL: target.dll
 2. Rename backup: target_original.dll -> target.dll
 
-## ❄️ Troubleshooting
+## Troubleshooting
 
 - **"gcc not found"**: Add MinG to PATH
 - **Permission denied**: Run as Administrator
 - []Look for logs: %TEMP%\zorin_*.log
 - []Use DebugView for debug output
 
-## ✈ Legal Disclaimer
+## Legal Disclaimer
 
 **For educational use only. Always obtain proper authorization before testing. Only use on systems you own or have written permission to test.**
 
-## ⚠️ License
+## License
 
 MIT License - See LICENSE file
 

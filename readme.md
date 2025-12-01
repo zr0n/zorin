@@ -42,10 +42,9 @@ void payload() {
 # Run the injector
 python zorin.py "C:\\Program Files\\Nmap\\libssh2.dll" payload.c
 
-# Test
-powershell
-# Or use the test loader
-test_loader.exe
+# Test (just run any executable that uses the patched dll)
+# In this case we are testing with nmap
+nmap --help
 ```
 
 ## ⟨ Usage

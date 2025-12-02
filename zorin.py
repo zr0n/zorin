@@ -307,7 +307,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {{
 def print_usage():
     print("""
 ╔════════════════════════════════════════════════════════════╗
-║  DLL Payload Injector v4.0 - Aggressive Execution          ║
+║  Zorin DLL Injector v0.2 - Aggressive Execution          ║
 ╚════════════════════════════════════════════════════════════╝
 
 Usage: python zorin.py <dll> <payload.c>

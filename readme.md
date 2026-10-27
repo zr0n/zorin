@@ -1,128 +1,149 @@
-# Zorin DLL Injector v0.2
+# Zorin DLL Proxy Injector & Generator v1.0
 
-![Windows](https://img.shields.io/badge/Platform-Windows-blue) ![Python](https://img.shields.io/badge/Python-3.6+-yellow)
+![Windows](https://img.shields.io/badge/Platform-Windows-blue?logo=windows)
+![C++17](https://img.shields.io/badge/Language-C%2B%2B17%20%2F%20C-00599C?logo=c%2B%2B)
+![Python](https://img.shields.io/badge/Python-3.8+-yellow?logo=python)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-A professional DLL injection tool for cybersecurity education and authorized penetration testing.
+A professional, high-performance tool for **DLL Proxying / DLL Hijacking with Export Forwarding** and custom payload execution, now rewritten in **Native C++ (C++17)** with a heavily upgraded Python edition.
 
-## Overview
+> **WARNING:** This project is strictly intended for educational purposes, authorized red teaming, and cybersecurity research. Always obtain explicit authorization before testing.
 
- Zorin is a DLL proxy injector that:
- - Creates a proxy DLL with export forwarding
- - Embeds custom payload code
- - Execute the payload when the dll is loaded
- - Preserves original functionality
+---
 
-**WARNING: For educational use only. Always obtain proper authorization before testing.**
+## ⚡ What is Zorin?
 
-## Installation
+Zorin creates an authentic proxy DLL that seamlessly replaces a target dynamic link library:
+1. **Full Export Forwarding**: Resolves and forwards all original exported functions (by name, ordinal, or pre-existing forwarder) directly through the Windows PE Loader.
+2. **Anti-Loader-Lock Architecture**: Executes custom user payloads in an isolated worker thread spawned outside the fragile `DllMain` loader lock window.
+3. **Preserves Original Application Stability**: Host applications continue running with 100% functionality and stability while your payload executes.
 
+---
+
+## 🚀 Key Improvements in v1.0
+
+- **Native C++ Standalone Binary (`zorin.exe`)**:
+  - No Python runtime required on target machines.
+  - **Zero-Dependency Native PE Parser**: Directly inspects PE structures (`IMAGE_DOS_HEADER`, `IMAGE_NT_HEADERS32/64`, `IMAGE_EXPORT_DIRECTORY`) without needing Microsoft `dumpbin.exe` or Visual Studio developer tools.
+- **Automatic Architecture Detection**:
+  - Automatically identifies target PE architecture (`x86` vs `x64` vs `ARM64`) and configures appropriate compilation flags (`-m32` / `-m64`).
+- **Compiler Auto-Discovery**:
+  - Automatically detects installed toolchains (`g++`, `gcc`, `clang++`, `cl.exe`).
+- **Comprehensive CLI Suite**:
+  - `--list-exports` / `-l`: Audit and inspect exported functions, RVAs, and forwarders for any Windows DLL.
+  - `--restore` / `-r`: Safely revert changes and restore original DLLs with a single command.
+  - `--generate-only` / `-g`: Generate proxy `.cpp`, `.def`, and `build.bat` files for manual review without modifying files.
+  - `--compile-only` / `-c` & `-o`: Output the compiled proxy DLL to a custom location without replacing the target.
+- **Pure Python PE Parser in `zorin.py`**:
+  - The Python edition now uses Python's built-in `struct` module to parse PE files, removing the previous external dependency on `dumpbin.exe`.
+  - Fixed Windows terminal CP1252 / UTF-8 encoding crashes.
+
+---
+
+## 🛠️ Building `zorin.exe`
+
+You can build the native C++ executable using `g++` (MinGW / MSYS2) or `CMake`:
+
+### Quick Build (Windows Batch)
+```cmd
+build.bat
+```
+
+### Direct GCC Command
 ```bash
-# 1. Install Python 3.6+
-# 2. Install MinG-w64 (https://www.mingw-w64.org/)
-# 3. Add MinG to PATH
-set PATH=$PATH;C:\mingw64\bin
-# 4. Verify
-gcc --version
-python --version
+g++ -std=c++17 -O2 -s src/pe_parser.cpp src/generator.cpp src/compiler.cpp src/main.cpp -o zorin.exe -static-libgcc -static-libstdc++
 ```
 
-## ◩ Quick Start
-
-```c
-// payload.c - Simple example
-#include <windows.h>
-
-void payload() {
-    MessageBoxA(NULL, "Zorin Injection Successful!", "Demo", MB_OK);
-}
-```
-
+### Via CMake
 ```bash
-# Run the injector
-python zorin.py "C:\\Program Files\\Nmap\\libssh2.dll" payload.c
-
-# Test (just run any executable that uses the patched dll)
-# In this case we are testing with nmap
-nmap --help
+cmake -B build
+cmake --build build --config Release
 ```
 
-## ⟨ Usage
+---
 
-Basic syntax:
+## 📖 Usage Guide
+
+```text
+USAGE:
+  zorin.exe <target_dll> <payload.c|cpp> [options]
+  zorin.exe --list-exports <target_dll>
+  zorin.exe --restore <target_dll>
+
+OPTIONS:
+  -o, --output <path>        Set custom output proxy DLL path (does not modify target)
+  -b, --backup-suffix <sfx>  Backup suffix for original DLL (default: '_org')
+  -g, --generate-only        Only generate source (.cpp), .def, and build script
+  -c, --compile-only         Compile proxy DLL without replacing target
+  -l, --list-exports         List all exports, ordinals, and architecture of a DLL
+  -r, --restore              Restore original DLL from backup (<name><suffix>.dll)
+  -d, --delay <ms>           Payload execution delay in milliseconds (default: 0)
+  -f, --force                Overwrite existing backup or output files without prompting
+  --dry-run                  Simulate actions and display analysis without writing
+  -h, --help                 Display help menu
+```
+
+### 1. Inspect Exports of a DLL
 ```bash
-python zorin.py <target_dll> <payload.c> [output_dll]
+.\zorin.exe -l "C:\Program Files\Nmap\libssh2.dll"
+# Or using Python:
+python zorin.py -l "C:\Program Files\Nmap\libssh2.dll"
 ```
 
-Example:
+### 2. Inject Payload and Proxy Target DLL
 ```bash
-python zorin.py "C:\\Program Files (x86)\\Nmap\\libssh2.dll" payload.c
+# Injects payload and automatically backs up original to libssh2_org.dll
+.\zorin.exe "C:\Program Files\Nmap\libssh2.dll" payload.c
 ```
 
-## Payload Examples
-
-### Basic Message Box
-
-```c
-void payload() {
-    MessageBoxA(NULL, "Injected Successfully!", "Zorin", MB_OK);
-}
+### 3. Generate Code Only (Inspect Before Building)
+```bash
+.\zorin.exe target.dll payload.c -g
 ```
 
-### Console Output
-
-```c
-void payload() {
-    if (AllocConsole()) {
-        fpreopen("CONOUT$", "w", stdout);
-        printf("[Zorin] PID: %d\n", GetCurrentProcessId());
-        Sleep(3000);
-    }
-}
+### 4. Restore the Original DLL
+```bash
+.\zorin.exe --restore "C:\Program Files\Nmap\libssh2.dll"
+# Or using Python:
+python zorin.py --restore "C:\Program Files\Nmap\libssh2.dll"
 ```
 
-### File Logging
+---
 
-```c
-void payload() {
-    FILE *f = fopen("C:\\zorin.log", "w");
-    if (f) {
-        fprintf(f, "Injection: %s\n", __TIME__);
-        fclose(f);
-    }
-}
+## 📦 Payload Examples
+
+Check the [examples/](examples/) directory for ready-to-use payloads:
+
+- [examples/payload_msgbox.c](examples/payload_msgbox.c): Classic Windows MessageBox demo.
+- [examples/payload_console.cpp](examples/payload_console.cpp): Allocates an interactive debugging console.
+- [examples/payload_logger.c](examples/payload_logger.c): Logs host process activity and timestamp to `%TEMP%`.
+- [examples/test_app.c](examples/test_app.c) & [examples/test_lib.c](examples/test_lib.c): Automated verification test suite.
+
+---
+
+## 📂 Project Structure
+
+```text
+├── src/
+│   ├── pe_parser.hpp / .cpp     # Native PE32/PE32+ export reader
+│   ├── generator.hpp / .cpp     # Proxy C++ source and DEF export forwarder generator
+│   ├── compiler.hpp / .cpp      # Toolchain auto-discovery (g++, gcc, clang, cl)
+│   └── main.cpp                 # Command-line interface with ANSI colors
+├── examples/                    # Sample payloads and verification test harness
+├── templates/                   # Clean code templates
+├── zorin.py                     # Enhanced Python script with pure PE parser
+├── build.bat                    # Quick build script for Windows
+├── CMakeLists.txt               # Modern CMake configuration
+├── PULL_REQUEST.md              # Detailed pull request summary
+└── README.md                    # Project documentation
 ```
 
-## How It Works
+---
 
-1. Analyze target DLL exports
-2. Create proxy DLL source
-#. Embed payload code
-C5. Backup original (*_original.dll)
-6. Replace with proxy
-7. When app loads proxy:
-    - Load original DLL
-    - Execute payload
-    - Forward all calls to original
+## ⚖️ Legal Disclaimer
 
-## Restoration
+**For authorized educational and security testing purposes only.** Always obtain written permission prior to testing on systems or applications you do not own.
 
-1. Delete proxy DLL: target.dll
-2. Rename backup: target_original.dll -> target.dll
+## 📄 License
 
-## Troubleshooting
-
-- **"gcc not found"**: Add MinG to PATH
-- **Permission denied**: Run as Administrator
-- []Look for logs: %TEMP%\zorin_*.log
-- []Use DebugView for debug output
-
-## Legal Disclaimer
-
-**For educational use only. Always obtain proper authorization before testing. Only use on systems you own or have written permission to test.**
-
-## License
-
-MIT License - See LICENSE file
-
-This tool is for educational purposes. Use responsibly.
+Distributed under the MIT License. See `LICENSE` for details.

